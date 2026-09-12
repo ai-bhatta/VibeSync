@@ -49,6 +49,56 @@ FALLBACK = {
 }
 
 
+def fallback_plans(payload: dict) -> list[dict]:
+    """A request-aware offline planner, used only when OpenRouter is unavailable."""
+    venues = payload.get("venues", [])
+    by_tag = {tag: next((v for v in venues if tag in v.get("tags", [])), None) for tag in
+              ["competitive", "gaming", "asian", "burgers", "cafe", "chill", "creative", "dessert"]}
+    request = str(payload.get("request", "")).lower()
+    vibe = str(payload.get("vibe", "surprise")).lower()
+    def pick(*keys):
+        return next((by_tag[k] for k in keys if by_tag.get(k)), venues[0] if venues else {"id":"unknown","name":"A local adventure","icon":"✦","estimatedPrice":0})
+    activity = pick("gaming", "competitive") if any(x in request + vibe for x in ["game", "competitive", "arcade"]) else pick("creative", "chill", "competitive")
+    food = pick("burgers") if "burger" in request else pick("asian", "cafe")
+    sweet = pick("dessert", "cafe")
+    alt_activity = pick("creative", "chill", "competitive")
+    alt_food = pick("cafe", "asian", "burgers")
+    routes = [[activity, food, sweet], [pick("competitive", "gaming"), pick("burgers", "asian"), sweet], [alt_activity, alt_food, pick("asian", "dessert")]]
+    labels = ["Best fit for the party", "High-energy wildcard", "Easygoing social run"]
+    plans = []
+    for i, route in enumerate(routes):
+        plans.append({"id": f"agent_plan_{i+1}", "title": labels[i], "places": route,
+                      "price": sum(int(v.get("estimatedPrice", 0)) for v in route),
+                      "match": max(72, 94 - i * 4),
+                      "reason": f"Built from your request: {payload.get('request', 'something fun for everyone')}."})
+    return plans
+
+
+def call_planner(payload: dict) -> tuple[list[dict], str, bool]:
+    venues = payload.get("venues", [])
+    live_context = exa_context(payload.get("location", os.getenv("SIDEQUEST_LOCATION", "Dubai")), payload.get("request", ""))
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return fallback_plans(payload), "fallback_no_openrouter_key", bool(live_context)
+    schema = {"type":"object","additionalProperties":False,"properties":{"plans":{"type":"array","minItems":3,"maxItems":3,"items":{"type":"object","additionalProperties":False,"properties":{"title":{"type":"string"},"venueIds":{"type":"array","minItems":3,"maxItems":3,"items":{"type":"string"}},"price":{"type":"integer"},"match":{"type":"integer"},"reason":{"type":"string"}},"required":["title","venueIds","price","match","reason"]}}},"required":["plans"]}
+    prompt = {"group":payload.get("group"),"budget":payload.get("budget"),"vibe":payload.get("vibe"),"request":payload.get("request"),"location":payload.get("location"),"venues":venues,"liveContext":live_context}
+    try:
+        data = json_request("https://openrouter.ai/api/v1/chat/completions", {"model":os.getenv("OPENROUTER_MODEL","google/gemini-2.0-flash-001"),"messages":[{"role":"system","content":"You are SideQuest Agent. Create exactly 3 complete group experiences from the supplied venues. Use only supplied venue IDs. Respect the requested budget and vibe. Return only JSON matching the schema."},{"role":"user","content":json.dumps(prompt)}],"temperature":0.7,"response_format":{"type":"json_schema","json_schema":{"name":"sidequest_plans","strict":True,"schema":schema}}},{"Authorization":f"Bearer {api_key}","HTTP-Referer":"http://localhost:4173","X-Title":"SideQuest"})
+        raw = data["choices"][0]["message"]["content"]
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        allowed = {str(v.get("id")):v for v in venues}
+        clean=[]
+        for i, plan in enumerate(parsed.get("plans", [])):
+            ids=plan.get("venueIds", [])
+            if len(ids)!=3 or any(str(x) not in allowed for x in ids): raise ValueError("invalid venue ids")
+            places=[allowed[str(x)] for x in ids]
+            clean.append({"id":f"agent_plan_{i+1}","title":str(plan.get("title","SideQuest plan"))[:80],"places":places,"price":int(plan.get("price",sum(int(v.get("estimatedPrice",0)) for v in places))),"match":max(0,min(100,int(plan.get("match",80)))),"reason":str(plan.get("reason","A plan built for the whole party."))[:180]})
+        if len(clean)==3: return clean, "openrouter", bool(live_context)
+    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError, json.JSONDecodeError):
+        pass
+    return fallback_plans(payload), "fallback_provider_error", bool(live_context)
+
+
 def json_request(url: str, payload: dict, headers: dict, timeout: int = 20) -> dict:
     body = json.dumps(payload).encode()
     request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", **headers}, method="POST")
@@ -136,6 +186,15 @@ def call_agent(payload: dict) -> tuple[dict, str, bool]:
 
 class Handler(SimpleHTTPRequestHandler):
     def do_POST(self) -> None:
+        if self.path == "/api/agent/plans":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                plans, source, exa_used = call_planner(payload)
+                self.send_json(200, {"ok": True, "source": source, "exaUsed": exa_used, "plans": plans})
+            except (ValueError, TypeError, json.JSONDecodeError):
+                self.send_json(400, {"ok": False, "error": "Invalid request"})
+            return
         if self.path != "/api/agent/compromise":
             self.send_error(404)
             return

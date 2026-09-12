@@ -23,4 +23,8 @@ EXA_API_KEY=your_exa_key
 SIDEQUEST_LOCATION=Dubai
 ```
 
-`OPENROUTER_API_KEY` enables the real SideQuest Agent compromise. `EXA_API_KEY` optionally adds live web context to the agent request. Both keys stay server-side. If either provider is unavailable, the app returns a validated local compromise so the demo continues working. The current venue catalog is still curated demo data; Exa context is advisory and cannot introduce unapproved venue IDs into the final plan.
+`OPENROUTER_API_KEY` enables the real SideQuest Agent for both plan generation and compromise. `EXA_API_KEY` optionally adds live web context to agent requests. Both keys stay server-side. If either provider is unavailable, the app returns request-aware local plans and a validated compromise so the demo continues working. The current venue catalog is still curated demo data; Exa context is advisory and cannot introduce unapproved venue IDs into the final plan.
+
+The plan screen sends the current request, selected budget, selected vibe, group profiles, and venue catalog to `POST /api/agent/plans`. The compromise screen sends votes and plans to `POST /api/agent/compromise`.
+
+After the collection screen, `Make our edit` opens the Memory Lab. Multiple uploaded photos and videos are arranged into a branded 9:16 SideQuest template with title, collage, sticker, progress, and end cards. Media stays in the browser; `canvas.captureStream()` and `MediaRecorder` create a downloadable WebM edit. No media is uploaded to the server in this version.

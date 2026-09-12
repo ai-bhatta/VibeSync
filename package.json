@@ -1,0 +1,9 @@
+{
+  "name": "sidequest-prototype",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "start": "uv run server.py",
+    "serve": "uv run server.py"
+  }
+}

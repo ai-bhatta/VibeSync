@@ -143,7 +143,9 @@ def call_planner(payload: dict) -> tuple[list[dict], str, bool]:
     if nearby:
         venues = nearby
     payload["_geoapifyUsed"] = bool(nearby)
-    live_context = exa_context(payload.get("location", os.getenv("SIDEQUEST_LOCATION", "Dubai")), payload.get("request", ""))
+    if not nearby:
+        venues = discovered_venues(payload)
+    live_context = exa_context(location_label(payload.get("location", os.getenv("SIDEQUEST_LOCATION", "Dubai"))), payload.get("request", ""))
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         payload["venues"] = venues
@@ -203,11 +205,55 @@ def json_request(url: str, payload: dict, headers: dict, timeout: int = 20) -> d
         return json.loads(response.read().decode())
 
 
+def location_label(location: object) -> str:
+    if isinstance(location, dict):
+        return str(location.get("city") or f"{location.get('lat', '')},{location.get('lng', '')}")
+    return str(location or os.getenv("SIDEQUEST_LOCATION", "Dubai"))
+
+
+def google_places(location: object) -> list[dict]:
+    key = os.getenv("GOOGLE_MAPS_API_KEY")
+    if not key or not isinstance(location, dict) or location.get("lat") is None or location.get("lng") is None:
+        return []
+    try:
+        data = json_request("https://places.googleapis.com/v1/places:searchNearby", {
+            "includedTypes": ["restaurant", "cafe", "bowling_alley", "amusement_center", "movie_theater", "park", "museum", "tourist_attraction"],
+            "maxResultCount": 20, "rankPreference": "DISTANCE",
+            "locationRestriction": {"circle": {"center": {"latitude": float(location["lat"]), "longitude": float(location["lng"])}, "radius": 8000.0}},
+        }, {"X-Goog-Api-Key": key, "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.priceLevel,places.currentOpeningHours,places.googleMapsUri,places.types"})
+        result = []
+        for place in data.get("places", []):
+            name, point = place.get("displayName", {}).get("text"), place.get("location", {})
+            if not name or "latitude" not in point:
+                continue
+            result.append({"id": place.get("id", name), "name": name, "icon": "📍", "address": place.get("formattedAddress", ""),
+                           "lat": point.get("latitude"), "lng": point.get("longitude"), "rating": place.get("rating"),
+                           "priceLevel": place.get("priceLevel", ""), "openNow": place.get("currentOpeningHours", {}).get("openNow"),
+                           "mapsUrl": place.get("googleMapsUri", ""), "estimatedPrice": 35, "tags": place.get("types", [])})
+        return result
+    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError):
+        return []
+
+
+def discovered_venues(payload: dict) -> list[dict]:
+    location = payload.get("location", os.getenv("SIDEQUEST_LOCATION", "Dubai"))
+    real = google_places(location)
+    if real:
+        return real
+    live = exa_context(location_label(location), str(payload.get("request", "")))
+    result = []
+    for i, item in enumerate(live):
+        result.append({"id": f"exa_{i+1}", "name": str(item.get("title") or "Local experience")[:100], "icon": "✦",
+                       "sourceUrl": item.get("url", ""), "details": " ".join(item.get("highlights", []))[:800],
+                       "estimatedPrice": 35, "tags": ["social", "local"]})
+    return result or payload.get("venues", [])
+
+
 def exa_context(location: str, request_text: str) -> list[dict]:
     key = os.getenv("EXA_API_KEY")
     if not key:
         return []
-    query = f"{location} fun group activities food tonight {request_text}".strip()
+    query = f"real restaurants activities things to do near {location} open today prices {request_text}".strip()
     try:
         data = json_request(
             "https://api.exa.ai/search",
@@ -249,8 +295,8 @@ def valid_compromise(candidate: object, venues: list[dict]) -> dict | None:
 
 
 def call_agent(payload: dict) -> tuple[dict, str, bool]:
-    venues = payload.get("venues", [])
-    live_context = exa_context(payload.get("location", os.getenv("SIDEQUEST_LOCATION", "Dubai")), payload.get("request", ""))
+    venues = discovered_venues(payload)
+    live_context = exa_context(location_label(payload.get("location", os.getenv("SIDEQUEST_LOCATION", "Dubai"))), payload.get("request", ""))
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         return fallback_compromise(venues), "fallback_no_openrouter_key", bool(live_context)
